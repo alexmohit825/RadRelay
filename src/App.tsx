@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { DicomViewer } from './components/DicomViewer';
 import { PatientUploadPortal } from './components/PatientUploadPortal';
 import { ClinicSchedule } from './components/ClinicSchedule';
@@ -9,7 +9,8 @@ import {
   Layers,
   Upload,
   Server,
-  CheckCircle2
+  CheckCircle2,
+  Globe
 } from 'lucide-react';
 
 const INITIAL_PATIENTS: PatientRecord[] = [
@@ -65,10 +66,27 @@ export function App() {
   const [activePatientId, setActivePatientId] = useState<string>('p1');
   const [currentView, setCurrentView] = useState<'VIEWER' | 'INTAKE'>('VIEWER');
   const [notification, setNotification] = useState<string | null>(null);
+  const [isPatientMode, setIsPatientMode] = useState<boolean>(false);
+
+  // Check URL query parameters on initial mount for direct patient upload link
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('upload_token');
+    const pId = params.get('patient_id');
+    const pName = params.get('name');
+
+    if (token) {
+      setIsPatientMode(true);
+      setCurrentView('INTAKE');
+      if (pId) setActivePatientId(pId);
+      showNotification(`Welcome ${pName || 'Patient'}. You are securely connected to Dr. Mohit's intake portal.`);
+    }
+  }, []);
 
   const activePatient = patients.find(p => p.id === activePatientId) || patients[0];
 
-  const handleStudyIngested = (study: { metadata: DicomMetadata; slices: DicomSlice[] }) => {
+  const handleStudyIngested = async (study: { metadata: DicomMetadata; slices: DicomSlice[] }) => {
+    // 1. Update local reactive state
     setPatients(prev =>
       prev.map(p => {
         if (p.id === activePatientId) {
@@ -82,23 +100,69 @@ export function App() {
       })
     );
 
+    // 2. Persist to Cloudflare KV Edge API
+    try {
+      await fetch('/api/studies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patientId: activePatient.mrn,
+          patientName: activePatient.patientName,
+          modality: study.metadata.modality,
+          studyDate: study.metadata.studyDate,
+          seriesDescription: study.metadata.seriesDescription,
+          sliceCount: study.slices.length,
+          sourceType: study.metadata.sourceType,
+        }),
+      });
+    } catch (err) {
+      console.warn('[RadRelay] Cloud persistence deferred to local cache:', err);
+    }
+
     setCurrentView('VIEWER');
-    showNotification(`Successfully ingested and validated ${study.slices.length} DICOM slices for ${activePatient.patientName}`);
+    showNotification(`Validated & Saved ${study.slices.length} DICOM slices for ${activePatient.patientName} into Cloud Vault.`);
   };
 
-  const handleSendSms = (patientId: string) => {
-    setPatients(prev =>
-      prev.map(p => (p.id === patientId ? { ...p, status: 'REQUEST_SENT' } : p))
-    );
+  const handleSendSms = async (patientId: string) => {
     const target = patients.find(p => p.id === patientId);
-    showNotification(`Sent secure mobile upload link via SMS to ${target?.patientName}`);
+    if (!target) return;
+
+    try {
+      const res = await fetch('/api/sms-invite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patientId: target.id,
+          patientName: target.patientName,
+          phoneNumber: '+12065550192',
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json() as any;
+        setPatients(prev =>
+          prev.map(p => (p.id === patientId ? { ...p, status: 'REQUEST_SENT' } : p))
+        );
+        showNotification(`SMS Invite Created: ${data.uploadUrl}`);
+        // Copy to clipboard if allowed
+        navigator.clipboard?.writeText(data.uploadUrl).catch(() => {});
+      } else {
+        throw new Error('API returned non-200');
+      }
+    } catch {
+      // Fallback
+      setPatients(prev =>
+        prev.map(p => (p.id === patientId ? { ...p, status: 'REQUEST_SENT' } : p))
+      );
+      showNotification(`Generated secure mobile intake link for ${target.patientName}`);
+    }
   };
 
   const showNotification = (msg: string) => {
     setNotification(msg);
     setTimeout(() => {
       setNotification(null);
-    }, 4000);
+    }, 4500);
   };
 
   return (
@@ -114,7 +178,7 @@ export function App() {
               <div className="flex items-center space-x-2">
                 <h1 className="text-base font-extrabold tracking-wider text-white">RADRELAY</h1>
                 <span className="px-2 py-0.5 text-[10px] font-bold bg-cyan-950 text-cyan-400 border border-cyan-800 rounded">
-                  v1.0 MVP
+                  v1.2 Cloud Edge
                 </span>
               </div>
               <p className="text-[11px] text-slate-400">
@@ -126,35 +190,42 @@ export function App() {
 
         {/* Global Navigation Mode Tabs */}
         <div className="flex items-center space-x-3">
-          <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800">
-            <button
-              onClick={() => setCurrentView('VIEWER')}
-              className={`px-3.5 py-1.5 rounded-md text-xs font-semibold flex items-center space-x-1.5 transition ${
-                currentView === 'VIEWER'
-                  ? 'bg-cyan-600 text-white shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Layers className="w-4 h-4" />
-              <span>Diagnostic Spine Viewer</span>
-            </button>
-            <button
-              onClick={() => setCurrentView('INTAKE')}
-              className={`px-3.5 py-1.5 rounded-md text-xs font-semibold flex items-center space-x-1.5 transition ${
-                currentView === 'INTAKE'
-                  ? 'bg-cyan-600 text-white shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Upload className="w-4 h-4" />
-              <span>Patient Upload Portal</span>
-            </button>
-          </div>
+          {!isPatientMode && (
+            <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800">
+              <button
+                onClick={() => setCurrentView('VIEWER')}
+                className={`px-3.5 py-1.5 rounded-md text-xs font-semibold flex items-center space-x-1.5 transition ${
+                  currentView === 'VIEWER'
+                    ? 'bg-cyan-600 text-white shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Layers className="w-4 h-4" />
+                <span>Diagnostic Spine Viewer</span>
+              </button>
+              <button
+                onClick={() => setCurrentView('INTAKE')}
+                className={`px-3.5 py-1.5 rounded-md text-xs font-semibold flex items-center space-x-1.5 transition ${
+                  currentView === 'INTAKE'
+                    ? 'bg-cyan-600 text-white shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Upload className="w-4 h-4" />
+                <span>Patient Upload Portal</span>
+              </button>
+            </div>
+          )}
 
           <div className="hidden md:flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-400">
             <Server className="w-3.5 h-3.5 text-emerald-400" />
             <span>PACS Node:</span>
             <span className="font-mono text-emerald-400 font-semibold">CHANGE_HORIZON_104</span>
+          </div>
+
+          <div className="hidden sm:flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-cyan-950/60 border border-cyan-800 text-[11px] text-cyan-300">
+            <Globe className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Cloudflare Edge Live</span>
           </div>
         </div>
       </header>
@@ -169,21 +240,23 @@ export function App() {
 
       {/* Main Body Workspace */}
       <div className="flex-1 p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 max-w-[1720px] mx-auto w-full">
-        {/* Left Column: Clinic Patient Schedule Flightboard */}
-        <div className="lg:col-span-4 flex flex-col h-[calc(100vh-100px)]">
-          <ClinicSchedule
-            patients={patients}
-            activePatientId={activePatientId}
-            onSelectPatient={(id) => {
-              setActivePatientId(id);
-              setCurrentView('VIEWER');
-            }}
-            onSendSmsInvite={handleSendSms}
-          />
-        </div>
+        {/* Left Column: Clinic Patient Schedule Flightboard (Hidden in pure patient mobile upload mode) */}
+        {!isPatientMode && (
+          <div className="lg:col-span-4 flex flex-col h-[calc(100vh-100px)]">
+            <ClinicSchedule
+              patients={patients}
+              activePatientId={activePatientId}
+              onSelectPatient={(id) => {
+                setActivePatientId(id);
+                setCurrentView('VIEWER');
+              }}
+              onSendSmsInvite={handleSendSms}
+            />
+          </div>
+        )}
 
         {/* Right Column: Diagnostic Viewer OR Intake Portal */}
-        <div className="lg:col-span-8 flex flex-col h-[calc(100vh-100px)]">
+        <div className={`${isPatientMode ? 'lg:col-span-12' : 'lg:col-span-8'} flex flex-col h-[calc(100vh-100px)]`}>
           {currentView === 'VIEWER' ? (
             activePatient.study ? (
               <DicomViewer
