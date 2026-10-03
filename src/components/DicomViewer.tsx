@@ -9,13 +9,20 @@ import {
   Layers,
   Activity,
   Send,
-  CheckCircle2
+  CheckCircle2,
+  Compass,
+  FileSpreadsheet
 } from 'lucide-react';
 
 interface DicomViewerProps {
   metadata: DicomMetadata;
   slices: DicomSlice[];
   onPushToChangePacs?: () => void;
+}
+
+interface Point {
+  x: number;
+  y: number;
 }
 
 export const DicomViewer: React.FC<DicomViewerProps> = ({
@@ -26,24 +33,39 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [currentSliceIndex, setCurrentSliceIndex] = useState<number>(Math.floor(slices.length / 2));
   const [zoom, setZoom] = useState<number>(1.1);
-  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
   const [windowCenter, setWindowCenter] = useState<number>(metadata.windowCenter || 180);
   const [windowWidth, setWindowWidth] = useState<number>(metadata.windowWidth || 350);
   const [rotation, setRotation] = useState<number>(0);
-  const [activeTool, setActiveTool] = useState<'scroll' | 'window' | 'zoom' | 'pan' | 'measure'>('scroll');
+  const [activeTool, setActiveTool] = useState<'scroll' | 'window' | 'zoom' | 'pan' | 'measure' | 'cobb' | 'stenosis'>('scroll');
   const [isInteracting, setIsInteracting] = useState<boolean>(false);
-  const [interactionStart, setInteractionStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  
-  const [measurementPoints, setMeasurementPoints] = useState<{ x: number; y: number }[]>([]);
+  const [interactionStart, setInteractionStart] = useState<Point>({ x: 0, y: 0 });
+
+  // Phase 3 Spine Measurement State
+  const [caliperPoints, setCaliperPoints] = useState<Point[]>([]);
+  const [cobbLines, setCobbLines] = useState<{ p1: Point; p2: Point }[]>([]);
+  const [stenosisCanalPoints, setStenosisCanalPoints] = useState<Point[]>([]);
   const [pacsPushStatus, setPacsPushStatus] = useState<'IDLE' | 'SENDING' | 'SUCCESS'>('IDLE');
 
+  // Synchronize state when study changes
   useEffect(() => {
     setCurrentSliceIndex(Math.floor(slices.length / 2));
     setWindowCenter(metadata.windowCenter || 180);
     setWindowWidth(metadata.windowWidth || 350);
-    setMeasurementPoints([]);
+    setCaliperPoints([]);
+    setCobbLines([]);
+    setStenosisCanalPoints([]);
     setPacsPushStatus('IDLE');
   }, [metadata, slices]);
+
+  // Calculate Cobb Angle between two lines
+  const calculateCobbAngle = (l1: { p1: Point; p2: Point }, l2: { p1: Point; p2: Point }) => {
+    const angle1 = Math.atan2(l1.p2.y - l1.p1.y, l1.p2.x - l1.p1.x);
+    const angle2 = Math.atan2(l2.p2.y - l2.p1.y, l2.p2.x - l2.p1.x);
+    let diff = Math.abs((angle1 - angle2) * (180 / Math.PI));
+    if (diff > 90) diff = 180 - diff;
+    return diff.toFixed(1);
+  };
 
   const renderSlice = useCallback(() => {
     const canvas = canvasRef.current;
@@ -91,19 +113,20 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
       ctx.drawImage(tempCanvas, -cols / 2, -rows / 2);
     }
 
-    if (measurementPoints.length > 0) {
+    // Render 1. Distance Caliper
+    if (caliperPoints.length > 0) {
       ctx.strokeStyle = '#38BDF8';
       ctx.fillStyle = '#38BDF8';
       ctx.lineWidth = 2 / zoom;
 
-      for (let i = 0; i < measurementPoints.length; i++) {
-        const pt = measurementPoints[i];
+      for (let i = 0; i < caliperPoints.length; i++) {
+        const pt = caliperPoints[i];
         ctx.beginPath();
         ctx.arc(pt.x - cols / 2, pt.y - rows / 2, 4 / zoom, 0, 2 * Math.PI);
         ctx.fill();
 
         if (i > 0) {
-          const prev = measurementPoints[i - 1];
+          const prev = caliperPoints[i - 1];
           ctx.beginPath();
           ctx.moveTo(prev.x - cols / 2, prev.y - rows / 2);
           ctx.lineTo(pt.x - cols / 2, pt.y - rows / 2);
@@ -122,8 +145,74 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
       }
     }
 
+    // Render 2. Cobb Angle Lines
+    if (cobbLines.length > 0) {
+      ctx.strokeStyle = '#F59E0B';
+      ctx.fillStyle = '#F59E0B';
+      ctx.lineWidth = 2 / zoom;
+
+      cobbLines.forEach((line, idx) => {
+        ctx.beginPath();
+        ctx.moveTo(line.p1.x - cols / 2, line.p1.y - rows / 2);
+        ctx.lineTo(line.p2.x - cols / 2, line.p2.y - rows / 2);
+        ctx.stroke();
+
+        ctx.font = `${11 / zoom}px -apple-system, sans-serif`;
+        ctx.fillText(
+          `Endplate ${idx + 1}`,
+          line.p2.x - cols / 2 + 5,
+          line.p2.y - rows / 2
+        );
+      });
+
+      if (cobbLines.length === 2) {
+        const angle = calculateCobbAngle(cobbLines[0], cobbLines[1]);
+        ctx.font = `bold ${14 / zoom}px -apple-system, sans-serif`;
+        ctx.fillStyle = '#F59E0B';
+        ctx.fillText(
+          `Cobb: ${angle}°`,
+          (cobbLines[0].p1.x + cobbLines[1].p1.x) / 2 - cols / 2,
+          (cobbLines[0].p1.y + cobbLines[1].p1.y) / 2 - rows / 2
+        );
+      }
+    }
+
+    // Render 3. Canal Stenosis AP Caliper
+    if (stenosisCanalPoints.length > 0) {
+      ctx.strokeStyle = '#EC4899';
+      ctx.fillStyle = '#EC4899';
+      ctx.lineWidth = 2 / zoom;
+
+      stenosisCanalPoints.forEach((pt) => {
+        ctx.beginPath();
+        ctx.arc(pt.x - cols / 2, pt.y - rows / 2, 4 / zoom, 0, 2 * Math.PI);
+        ctx.fill();
+      });
+
+      if (stenosisCanalPoints.length === 2) {
+        const [p1, p2] = stenosisCanalPoints;
+        ctx.beginPath();
+        ctx.moveTo(p1.x - cols / 2, p1.y - rows / 2);
+        ctx.lineTo(p2.x - cols / 2, p2.y - rows / 2);
+        ctx.stroke();
+
+        const distPx = Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+        const distMm = distPx * 0.82;
+        let grading = 'Normal (>12mm)';
+        if (distMm < 10) grading = 'Severe Stenosis (<10mm)';
+        else if (distMm < 12) grading = 'Relative Stenosis (10-12mm)';
+
+        ctx.font = `${11 / zoom}px -apple-system, sans-serif`;
+        ctx.fillText(
+          `Canal AP: ${distMm.toFixed(1)} mm [${grading}]`,
+          (p1.x + p2.x) / 2 - cols / 2 + 5,
+          (p1.y + p2.y) / 2 - rows / 2 - 5
+        );
+      }
+    }
+
     ctx.restore();
-  }, [currentSliceIndex, slices, zoom, pan, rotation, windowCenter, windowWidth, measurementPoints]);
+  }, [currentSliceIndex, slices, zoom, pan, rotation, windowCenter, windowWidth, caliperPoints, cobbLines, stenosisCanalPoints]);
 
   useEffect(() => {
     renderSlice();
@@ -133,18 +222,26 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
     setIsInteracting(true);
     setInteractionStart({ x: e.clientX, y: e.clientY });
 
-    if (activeTool === 'measure') {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
-      const clickX = (e.clientX - rect.left - canvas.width / 2 - pan.x) / zoom + 128;
-      const clickY = (e.clientY - rect.top - canvas.height / 2 - pan.y) / zoom + 128;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const clickX = (e.clientX - rect.left - canvas.width / 2 - pan.x) / zoom + 128;
+    const clickY = (e.clientY - rect.top - canvas.height / 2 - pan.y) / zoom + 128;
 
-      if (measurementPoints.length >= 2) {
-        setMeasurementPoints([{ x: clickX, y: clickY }]);
+    if (activeTool === 'measure') {
+      if (caliperPoints.length >= 2) setCaliperPoints([{ x: clickX, y: clickY }]);
+      else setCaliperPoints(prev => [...prev, { x: clickX, y: clickY }]);
+    } else if (activeTool === 'cobb') {
+      if (cobbLines.length === 0) {
+        setCobbLines([{ p1: { x: clickX, y: clickY }, p2: { x: clickX + 40, y: clickY } }]);
+      } else if (cobbLines.length === 1) {
+        setCobbLines(prev => [...prev, { p1: { x: clickX, y: clickY }, p2: { x: clickX + 40, y: clickY } }]);
       } else {
-        setMeasurementPoints(prev => [...prev, { x: clickX, y: clickY }]);
+        setCobbLines([{ p1: { x: clickX, y: clickY }, p2: { x: clickX + 40, y: clickY } }]);
       }
+    } else if (activeTool === 'stenosis') {
+      if (stenosisCanalPoints.length >= 2) setStenosisCanalPoints([{ x: clickX, y: clickY }]);
+      else setStenosisCanalPoints(prev => [...prev, { x: clickX, y: clickY }]);
     }
   };
 
@@ -218,7 +315,7 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
             <div className="text-[11px] text-slate-400">Target PACS</div>
             <div className="text-xs font-mono font-medium text-emerald-400 flex items-center space-x-1">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span>CHANGE_HORIZON_104</span>
+              <span>CHANGE_HORIZON</span>
             </div>
           </div>
 
@@ -236,12 +333,12 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
             {pacsPushStatus === 'SUCCESS' ? (
               <>
                 <CheckCircle2 className="w-4 h-4" />
-                <span>Relayed to PACS</span>
+                <span>Relayed via C-STORE</span>
               </>
             ) : pacsPushStatus === 'SENDING' ? (
               <>
                 <Activity className="w-4 h-4 animate-spin" />
-                <span>Pushed C-STORE...</span>
+                <span>Pushing to Port 104...</span>
               </>
             ) : (
               <>
@@ -290,6 +387,7 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
         </div>
       </div>
 
+      {/* Floating Toolbar & Scrub Controls */}
       <div className="p-3 bg-slate-900 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center space-x-3 flex-1 min-w-[240px]">
           <span className="text-xs font-mono text-slate-400">Slice</span>
@@ -306,6 +404,7 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
           </span>
         </div>
 
+        {/* Diagnostic Tools Button Group */}
         <div className="flex items-center space-x-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800">
           <button
             onClick={() => setActiveTool('scroll')}
@@ -316,7 +415,7 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
           </button>
           <button
             onClick={() => setActiveTool('window')}
-            title="Window / Level (Contrast)"
+            title="Window / Level"
             className={`p-1.5 rounded transition ${activeTool === 'window' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'}`}
           >
             <Sun className="w-4 h-4" />
@@ -328,12 +427,28 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
           >
             <ZoomIn className="w-4 h-4" />
           </button>
+          <div className="h-4 w-px bg-slate-800 mx-1"></div>
+          {/* Caliper Measurement Suite */}
           <button
             onClick={() => setActiveTool('measure')}
-            title="Cobb / Stenosis Caliper (Ruler)"
+            title="Millimeter Caliper"
             className={`p-1.5 rounded transition ${activeTool === 'measure' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'}`}
           >
             <Ruler className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setActiveTool('cobb')}
+            title="Cobb Angle Tool (Lordosis / Scoliosis)"
+            className={`p-1.5 rounded transition ${activeTool === 'cobb' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-amber-400'}`}
+          >
+            <Compass className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setActiveTool('stenosis')}
+            title="Spinal Canal AP Stenosis Caliper"
+            className={`p-1.5 rounded transition ${activeTool === 'stenosis' ? 'bg-pink-600 text-white' : 'text-slate-400 hover:text-pink-400'}`}
+          >
+            <FileSpreadsheet className="w-4 h-4" />
           </button>
           <div className="h-4 w-px bg-slate-800 mx-1"></div>
           <button
@@ -350,9 +465,11 @@ export const DicomViewer: React.FC<DicomViewerProps> = ({
               setRotation(0);
               setWindowCenter(metadata.windowCenter || 180);
               setWindowWidth(metadata.windowWidth || 350);
-              setMeasurementPoints([]);
+              setCaliperPoints([]);
+              setCobbLines([]);
+              setStenosisCanalPoints([]);
             }}
-            title="Reset View"
+            title="Reset All Tools"
             className="p-1.5 rounded text-slate-400 hover:text-white"
           >
             <Maximize2 className="w-4 h-4" />
