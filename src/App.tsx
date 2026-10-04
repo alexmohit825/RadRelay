@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { DicomViewer } from './components/DicomViewer';
 import { PatientUploadPortal } from './components/PatientUploadPortal';
 import { ClinicSchedule } from './components/ClinicSchedule';
+import { GuideModal } from './components/GuideModal';
 import { generateSyntheticSpineMriStudy } from './services/dicomParser';
 import type { PatientRecord, DicomMetadata, DicomSlice } from './types/dicom';
 import {
@@ -9,7 +10,8 @@ import {
   Upload,
   Server,
   CheckCircle2,
-  Globe
+  Globe,
+  HelpCircle
 } from 'lucide-react';
 
 const INITIAL_PATIENTS: PatientRecord[] = [
@@ -66,6 +68,7 @@ export function App() {
   const [currentView, setCurrentView] = useState<'VIEWER' | 'INTAKE'>('VIEWER');
   const [notification, setNotification] = useState<string | null>(null);
   const [isPatientMode, setIsPatientMode] = useState<boolean>(false);
+  const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
 
   // Check URL query parameters on initial mount for direct patient upload link
   useEffect(() => {
@@ -221,6 +224,16 @@ export function App() {
             <Globe className="w-3.5 h-3.5 text-cyan-400" />
             <span>Cloudflare Edge Live</span>
           </div>
+
+          {/* Toggleable Guide Button */}
+          <button
+            onClick={() => setIsGuideOpen(true)}
+            title="Open Clinical Workflow & PACS Guide"
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 text-xs font-medium transition cursor-pointer"
+          >
+            <HelpCircle className="w-4 h-4 text-cyan-400" />
+            <span className="hidden sm:inline">Guide</span>
+          </button>
         </div>
       </header>
 
@@ -299,6 +312,9 @@ export function App() {
           )}
         </div>
       </div>
+
+      {/* Guide Modal Component */}
+      <GuideModal isOpen={isGuideOpen} onClose={() => setIsGuideOpen(false)} />
     </div>
   );
 }
